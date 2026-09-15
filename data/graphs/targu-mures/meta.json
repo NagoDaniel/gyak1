@@ -1,0 +1,13 @@
+{
+  "attribution": "\u00a9 OpenStreetMap contributors (ODbL)",
+  "nodes": 9192,
+  "edges": 11089,
+  "bbox": [
+    46.4957507,
+    24.4743237,
+    46.6028798,
+    24.6685746
+  ],
+  "name": "romania-260806.osm.pbf",
+  "source": "pbf=data/graphs/romania-260806.osm.pbf bbox=(24.48, 46.5, 24.66, 46.6)"
+}

@@ -1,0 +1,25 @@
+# build output
+build/
+# CLion builds here instead, one directory per CMake profile
+cmake-build-*/
+*.o
+*.exe
+
+.vscode/
+.idea/
+
+# generated at run time
+trace.txt
+dfs.txt
+*.txt.trace
+*.png
+*.gif
+
+# large map extracts -- not needed, pre-built graphs are checked in
+*.osm.pbf
+*.osm
+*.xml
+
+__pycache__/
+*.pyc
+.DS_Store

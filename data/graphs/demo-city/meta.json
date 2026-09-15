@@ -1,0 +1,13 @@
+{
+  "name": "demo-city (synthetic)",
+  "source": "make_demo_graph.py",
+  "attribution": "synthetic data, not derived from OpenStreetMap",
+  "nodes": 4198,
+  "edges": 8521,
+  "bbox": [
+    46.514294972661354,
+    24.518995677996664,
+    46.578833682167,
+    24.611167841131284
+  ]
+}

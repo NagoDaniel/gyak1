@@ -1,0 +1,21 @@
+{
+  "attribution": "\u00a9 OpenStreetMap contributors (ODbL)",
+  "nodes": 55054,
+  "edges": 61583,
+  "bbox": [
+    43.6254734,
+    20.4449891,
+    48.2618821,
+    28.8050475
+  ],
+  "name": "romania-260806.osm.pbf",
+  "highway_classes": [
+    "motorway",
+    "motorway_link",
+    "primary",
+    "primary_link",
+    "trunk",
+    "trunk_link"
+  ],
+  "source": "pbf=data/graphs/romania-260806.osm.pbf bbox=(20.22, 43.62, 29.75, 48.27)"
+}

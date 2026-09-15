@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>trafik — street graph algorithm viewer</title>
+<!--
+  Single file, zero dependencies, no build step.
+  Loads a graph (nodes/edges/geom CSVs) plus a trace file emitted by a
+  student's C++ program, and replays the search step by step.
+
+  Two ways to use it:
+    1. python3 tools/serve.py   then open  ?graph=demo-city&trace=trace.txt
+    2. open the file directly and drag a trace file onto the window
+
+  Rendering strategy: the street network is drawn once to an offscreen canvas
+  and blitted each frame; algorithm state accumulates on a second canvas and is
+  only ever added to. That keeps playback smooth on graphs with 100k+ edges,
+  where redrawing every edge every frame would not be.
+-->
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --ink:#e6e8ec; --muted:#8b93a3; --line:#252a34; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+              font:13px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  #app { display:flex; height:100%; }
+  #stage { position:relative; flex:1; overflow:hidden; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #side { width:290px; background:var(--panel); border-left:1px solid var(--line);
+          padding:16px; overflow:auto; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:14px; margin:0; letter-spacing:.02em; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+       color:var(--muted); margin:0 0 6px; font-weight:600; }
+  .row { display:flex; gap:8px; align-items:center; }
+  button { background:#222836; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:6px 11px; cursor:pointer; font-size:13px; }
+  button:hover { background:#2b3345; }
+  button.primary { background:#3b6ef0; border-color:#3b6ef0; }
+  button.primary:hover { background:#5480f5; }
+  input[type=range] { width:100%; accent-color:#3b6ef0; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td { padding:2px 0; }
+  td:last-child { text-align:right; color:var(--muted); }
+  .legend { display:flex; align-items:center; gap:8px; margin:3px 0; }
+  .sw { width:22px; height:4px; border-radius:2px; }
+  .hint { color:var(--muted); font-size:12px; }
+  #drop { position:absolute; inset:0; display:none; align-items:center;
+          justify-content:center; background:rgba(59,110,240,.15);
+          border:2px dashed #3b6ef0; font-size:16px; }
+  #drop.on { display:flex; }
+  #status { position:absolute; left:12px; top:12px; background:rgba(15,17,21,.8);
+            padding:6px 10px; border-radius:6px; font-size:12px; }
+</style>
+
+<div id="app">
+  <div id="stage">
+    <canvas id="base"></canvas>
+    <canvas id="algo"></canvas>
+    <canvas id="fx"></canvas>
+    <div id="status">no graph loaded</div>
+    <div id="drop">drop nodes.csv, edges.csv, geom.csv and your trace file here</div>
+  </div>
+
+  <div id="side">
+    <h1>trafik viewer</h1>
+
+    <div>
+      <h2>playback</h2>
+      <div class="row">
+        <button id="play" class="primary">▶ play</button>
+        <button id="step">step</button>
+        <button id="reset">reset</button>
+      </div>
+      <input type="range" id="scrub" min="0" max="0" value="0">
+      <div class="hint"><span id="pos">0</span> / <span id="total">0</span> events</div>
+      <div class="hint">speed: <span id="spdlab">400</span> events/frame</div>
+      <input type="range" id="speed" min="1" max="1000" value="400">
+    </div>
+
+    <div>
+      <h2>run</h2>
+      <table id="stats"></table>
+    </div>
+
+    <div>
+      <h2>legend</h2>
+      <div class="legend"><div class="sw" style="background:#2a2f3a"></div>street</div>
+      <div class="legend"><div class="sw" style="background:#69707e"></div>edge scanned</div>
+      <div class="legend"><div class="sw" style="background:#ff9d1f"></div>frontier</div>
+      <div class="legend"><div class="sw" style="background:#3b6ef0"></div>settled</div>
+      <div class="legend"><div class="sw" style="background:#ff3b58;height:5px"></div>shortest path</div>
+    </div>
+
+    <div>
+      <h2>view</h2>
+      <div class="hint">scroll to zoom, drag to pan</div>
+      <div class="row"><button id="fit">fit</button><button id="png">save png</button></div>
+    </div>
+
+    <div class="hint" id="attrib"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- state ---
+const G = { lat:[], lon:[], edges:[], geom:[], meta:null };
+let events = [];        // parsed trace
+let notes  = {};        // note key -> value
+let srcNode = -1, dstNode = -1, pathEdges = [];
+let cursor = 0, playing = false;
+
+const base = document.getElementById('base'), bctx = base.getContext('2d');
+const algo = document.getElementById('algo'), actx = algo.getContext('2d');
+const fx   = document.getElementById('fx'),   fctx = fx.getContext('2d');
+const stage = document.getElementById('stage');
+
+// view transform, in mercator units
+let view = { x0:0, y0:0, x1:1, y1:1 };
+
+// ------------------------------------------------------------ projection ---
+// Scaled to degrees so x (raw longitude) and y share one unit. Without the
+// 180/PI factor the whole map collapses into a horizontal line.
+const mercY = lat => Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360)) * 180/Math.PI;
+
+function project(lat, lon) {
+  const w = base.width, h = base.height;
+  const sx = w / (view.x1 - view.x0), sy = h / (view.y1 - view.y0);
+  return [ (lon - view.x0) * sx, h - (mercY(lat) - view.y0) * sy ];
+}
+
+function fitView() {
+  let minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9;
+  for (let i=0;i<G.lat.length;i++){
+    const y = mercY(G.lat[i]), x = G.lon[i];
+    if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+  }
+  const padx=(maxx-minx)*0.03, pady=(maxy-miny)*0.03;
+  minx-=padx; maxx+=padx; miny-=pady; maxy+=pady;
+  // Preserve aspect ratio so the city is not stretched.
+  const aspect = base.width / base.height;
+  let w = maxx-minx, h = maxy-miny;
+  if (w/h > aspect) h = w/aspect; else w = h*aspect;
+  const cx=(minx+maxx)/2, cy=(miny+maxy)/2;
+  view = { x0:cx-w/2, x1:cx+w/2, y0:cy-h/2, y1:cy+h/2 };
+}
+
+// --------------------------------------------------------------- drawing ---
+function edgePoints(id) {
+  const g = G.geom[id];
+  if (g) return g;
+  const e = G.edges[id];
+  return [G.lat[e.u], G.lon[e.u], G.lat[e.v], G.lon[e.v]];
+}
+
+function strokeEdge(ctx, id, color, width) {
+  const p = edgePoints(id);
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.beginPath();
+  let [x,y] = project(p[0], p[1]);
+  ctx.moveTo(x,y);
+  for (let i=2;i<p.length;i+=2){ [x,y]=project(p[i],p[i+1]); ctx.lineTo(x,y); }
+  ctx.stroke();
+}
+
+function drawBase() {
+  bctx.setTransform(1,0,0,1,0,0);
+  bctx.fillStyle = '#0f1115';
+  bctx.fillRect(0,0,base.width,base.height);
+  bctx.lineCap = 'round';
+  const scale = base.width / (view.x1 - view.x0);
+  const lw = Math.max(0.6, Math.min(3, scale * 2.2e-5));
+  bctx.strokeStyle = '#2a2f3a';
+  bctx.lineWidth = lw;
+  bctx.beginPath();
+  for (let id=0; id<G.edges.length; id++) {
+    const p = edgePoints(id);
+    let [x,y] = project(p[0],p[1]);
+    bctx.moveTo(x,y);
+    for (let i=2;i<p.length;i+=2){ [x,y]=project(p[i],p[i+1]); bctx.lineTo(x,y); }
+  }
+  bctx.stroke();  // one path for the whole network: fast even at 100k edges
+}
+
+function clearAlgo() {
+  actx.setTransform(1,0,0,1,0,0);
+  actx.clearRect(0,0,algo.width,algo.height);
+  actx.lineCap = 'round';
+}
+
+function lineWidth(mult) {
+  const scale = base.width / (view.x1 - view.x0);
+  return Math.max(0.8, Math.min(6, scale * 2.6e-5)) * mult;
+}
+
+// Markers and the final path live on their own layer so they are never buried
+// by later algorithm strokes.
+function drawFx() {
+  fctx.setTransform(1,0,0,1,0,0);
+  fctx.clearRect(0,0,fx.width,fx.height);
+  fctx.lineCap = 'round';
+  if (pathEdges.length && cursor >= events.length) {
+    fctx.shadowColor = '#ff3b58'; fctx.shadowBlur = 12;
+    for (const id of pathEdges) strokeEdge(fctx, id, '#ff3b58', lineWidth(2.1));
+    fctx.shadowBlur = 0;
+  }
+  const dot = (n, color) => {
+    if (n < 0 || n >= G.lat.length) return;
+    const [x,y] = project(G.lat[n], G.lon[n]);
+    fctx.beginPath(); fctx.arc(x,y,6,0,7); fctx.fillStyle = color; fctx.fill();
+    fctx.lineWidth = 2; fctx.strokeStyle = '#0f1115'; fctx.stroke();
+  };
+  dot(srcNode, '#39d98a');
+  dot(dstNode, '#ff3b58');
+}
+
+// -------------------------------------------------------------- playback ---
+// Applying an event only ever adds ink to the algo canvas, so stepping forward
+// is O(1) per event. Stepping backward replays from zero, which is fast enough.
+const treeEdge = new Map();
+
+// An edge can be scanned again after it's already been settled -- e.g. a BFS
+// node scans the arc straight back to its own parent, which is the same
+// edge_id its settle just painted blue. Track the strongest state each edge
+// has reached so a later, weaker event (scan) never repaints over a stronger
+// one (settle): the picture must only ever gain ink, never lose it.
+const edgeLevel = new Map();
+function paintEdge(id, level, color, width) {
+  if ((edgeLevel.get(id) ?? -1) > level) return;
+  edgeLevel.set(id, level);
+  strokeEdge(actx, id, color, lineWidth(width));
+}
+
+function applyEvent(ev) {
+  switch (ev[0]) {
+    case 1: // scan <edge>
+      paintEdge(ev[1], 0, 'rgba(124,134,151,0.45)', 0.9);
+      break;
+    case 2: { // discover <node> <dist> <via>
+      if (ev[3] >= 0) {
+        // Relaxation (Dijkstra/A*) can discover the same node twice with a
+        // better distance before it settles. The earlier via-edge is no
+        // longer part of the tree -- drop it back to the scan trail instead
+        // of leaving a permanent orange stub where the two paths met.
+        const old = treeEdge.get(ev[1]);
+        if (old !== undefined && old !== ev[3] && (edgeLevel.get(old) ?? -1) < 2) {
+          edgeLevel.set(old, 0);
+          strokeEdge(actx, old, 'rgba(124,134,151,0.45)', lineWidth(0.9));
+        }
+        treeEdge.set(ev[1], ev[3]);
+        paintEdge(ev[3], 1, '#ff9d1f', 1.15);
+      }
+      break;
+    }
+    case 3: { // settle <node> <dist>
+      const e = treeEdge.get(ev[1]);
+      if (e !== undefined) paintEdge(e, 2, '#3b6ef0', 1.25);
+      break;
+    }
+  }
+}
+
+function seek(target) {
+  target = Math.max(0, Math.min(events.length, target));
+  if (target < cursor) { clearAlgo(); treeEdge.clear(); edgeLevel.clear(); cursor = 0; }
+  while (cursor < target) applyEvent(events[cursor++]);
+  document.getElementById('scrub').value = cursor;
+  document.getElementById('pos').textContent = cursor.toLocaleString();
+  drawFx();
+}
+
+function frame() {
+  if (playing) {
+    const n = Math.min(1000, +document.getElementById('speed').value);
+    seek(cursor + n);
+    if (cursor >= events.length) setPlaying(false);
+  }
+  requestAnimationFrame(frame);
+}
+
+function setPlaying(on) {
+  playing = on;
+  document.getElementById('play').textContent = on ? '❚❚ pause' : '▶ play';
+}
+
+// --------------------------------------------------------------- parsing ---
+// Split on \r?\n throughout: trace.hpp opens its file in text mode, so on
+// Windows every line ends \r\n and a bare '\n' split leaves a stray carriage
+// return on the last field of every row.
+function parseNodes(text) {
+  const lines = text.trim().split(/\r?\n/);
+  G.lat = []; G.lon = [];
+  for (let i=1;i<lines.length;i++){
+    const f = lines[i].split(',');
+    G.lat.push(+f[2]); G.lon.push(+f[3]);
+  }
+}
+
+function parseEdges(text) {
+  const lines = text.trim().split(/\r?\n/);
+  G.edges = [];
+  for (let i=1;i<lines.length;i++){
+    const f = lines[i].split(',');
+    G.edges.push({ u:+f[1], v:+f[2], len:+f[3], spd:+f[4], oneway:f[5]==='1' });
+  }
+}
+
+function parseGeom(text) {
+  const lines = text.trim().split(/\r?\n/);
+  G.geom = [];
+  for (let i=1;i<lines.length;i++){
+    const c = lines[i].indexOf(',');
+    if (c < 0) continue;
+    const id = +lines[i].slice(0,c);
+    const flat = [];
+    for (const pair of lines[i].slice(c+1).split(' ')) {
+      const k = pair.indexOf(':');
+      if (k > 0) { flat.push(+pair.slice(0,k), +pair.slice(k+1)); }
+    }
+    G.geom[id] = flat;
+  }
+}
+
+// Trace events become small numeric arrays rather than objects: a city-sized
+// run is hundreds of thousands of events and object overhead adds up.
+function parseTrace(text) {
+  events = []; notes = {}; pathEdges = []; srcNode = dstNode = -1;
+  for (const raw of text.split(/\r?\n/)) {
+    if (!raw) continue;
+    const sp = raw.indexOf(' ');
+    const kind = sp < 0 ? raw : raw.slice(0, sp);
+    const rest = sp < 0 ? '' : raw.slice(sp+1);
+    if (kind === 'scan')          events.push([1, +rest]);
+    else if (kind === 'discover') { const f = rest.split(' '); events.push([2, +f[0], +f[1], +f[2]]); }
+    else if (kind === 'settle')   { const f = rest.split(' '); events.push([3, +f[0], +f[1]]); }
+    else if (kind === 'path')     { const f = rest.split(' '); notes['path cost'] = +f[0];
+                                    pathEdges = f.slice(1).map(Number); }
+    else if (kind === 'note')     { const k = rest.indexOf(' ');
+                                    notes[rest.slice(0,k)] = rest.slice(k+1); }
+    else if (kind === 'meta')     { const f = rest.split(' ');
+                                    if (f[0]==='source') srcNode = +f[1];
+                                    if (f[0]==='target') dstNode = +f[1]; }
+    else if (kind === 'phase')    { /* reserved for bidirectional search */ }
+  }
+  renderStats();
+  const sc = document.getElementById('scrub');
+  sc.max = events.length; sc.value = 0;
+  document.getElementById('total').textContent = events.length.toLocaleString();
+  clearAlgo(); treeEdge.clear(); edgeLevel.clear(); cursor = 0; drawFx();
+}
+
+function renderStats() {
+  const t = document.getElementById('stats');
+  t.innerHTML = '';
+  for (const [k,v] of Object.entries(notes)) {
+    const n = Number(v);
+    const shown = Number.isFinite(n) ? n.toLocaleString(undefined,{maximumFractionDigits:2}) : v;
+    t.insertAdjacentHTML('beforeend', `<tr><td>${k}</td><td>${shown}</td></tr>`);
+  }
+  if (pathEdges.length)
+    t.insertAdjacentHTML('beforeend',
+      `<tr><td>path edges</td><td>${pathEdges.length}</td></tr>`);
+}
+
+// ---------------------------------------------------------------- resize ---
+function resize() {
+  const s = document.getElementById('stage');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  for (const c of [base, algo, fx]) {
+    c.width = Math.floor(s.clientWidth * dpr);
+    c.height = Math.floor(s.clientHeight * dpr);
+  }
+}
+
+function redrawAll() {
+  drawBase();
+  clearAlgo(); treeEdge.clear(); edgeLevel.clear();
+  const at = cursor; cursor = 0; seek(at);
+}
+
+// ------------------------------------------------------------------ load ---
+async function loadFromServer(graph, traceFile) {
+  const dir = `../data/graphs/${graph}`;
+  const get = async p => { const r = await fetch(p); if(!r.ok) throw new Error(p); return r.text(); };
+  parseNodes(await get(`${dir}/nodes.csv`));
+  parseEdges(await get(`${dir}/edges.csv`));
+  try { parseGeom(await get(`${dir}/geom.csv`)); } catch { G.geom = []; }
+  try { G.meta = JSON.parse(await get(`${dir}/meta.json`)); } catch {}
+  document.getElementById('attrib').textContent = G.meta?.attribution || '';
+  resize(); fitView(); drawBase();
+  document.getElementById('status').textContent =
+    `${graph} — ${G.lat.length.toLocaleString()} nodes, ${G.edges.length.toLocaleString()} edges`;
+  if (traceFile) { try { parseTrace(await get(`../${traceFile}`)); } catch {} }
+}
+
+// Drag and drop, so the viewer also works straight from the filesystem.
+const dz = document.getElementById('drop');
+addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('on'); });
+addEventListener('dragleave', e => { if (e.target === dz) dz.classList.remove('on'); });
+addEventListener('drop', async e => {
+  e.preventDefault(); dz.classList.remove('on');
+  let gotGraph = false;
+  for (const f of e.dataTransfer.files) {
+    const text = await f.text();
+    if (f.name === 'nodes.csv') { parseNodes(text); gotGraph = true; }
+    else if (f.name === 'edges.csv') { parseEdges(text); gotGraph = true; }
+    else if (f.name === 'geom.csv') parseGeom(text);
+    else if (f.name === 'meta.json') G.meta = JSON.parse(text);
+    else parseTrace(text);
+  }
+  if (gotGraph && G.lat.length && G.edges.length) {
+    resize(); fitView(); redrawAll();
+    document.getElementById('status').textContent =
+      `${G.lat.length.toLocaleString()} nodes, ${G.edges.length.toLocaleString()} edges`;
+  }
+});
+
+// ---------------------------------------------------------------- events ---
+document.getElementById('play').onclick  = () => setPlaying(!playing);
+document.getElementById('step').onclick  = () => { setPlaying(false); seek(cursor+1); };
+document.getElementById('reset').onclick = () => { setPlaying(false); seek(0); };
+document.getElementById('scrub').oninput = e => { setPlaying(false); seek(+e.target.value); };
+document.getElementById('speed').oninput = e =>
+  document.getElementById('spdlab').textContent = e.target.value;
+document.getElementById('fit').onclick    = () => { fitView(); redrawAll(); };
+document.getElementById('png').onclick = () => {
+  const out = document.createElement('canvas');
+  out.width = base.width; out.height = base.height;
+  const c = out.getContext('2d');
+  c.drawImage(base,0,0); c.drawImage(algo,0,0); c.drawImage(fx,0,0);
+  const a = document.createElement('a');
+  a.download = 'trafik.png'; a.href = out.toDataURL(); a.click();
+};
+
+// zoom / pan
+stage.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = stage.getBoundingClientRect();
+  const fxr = (e.clientX - r.left) / r.width, fyr = 1 - (e.clientY - r.top) / r.height;
+  const k = Math.exp(e.deltaY * 0.003);
+  const w = (view.x1-view.x0)*k, h = (view.y1-view.y0)*k;
+  const cx = view.x0 + (view.x1-view.x0)*fxr, cy = view.y0 + (view.y1-view.y0)*fyr;
+  view = { x0:cx-w*fxr, x1:cx+w*(1-fxr), y0:cy-h*fyr, y1:cy+h*(1-fyr) };
+  redrawAll();
+}, {passive:false});
+
+let drag = null;
+stage.addEventListener('pointerdown', e => { drag = {x:e.clientX, y:e.clientY}; stage.setPointerCapture(e.pointerId); });
+stage.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const r = stage.getBoundingClientRect();
+  const dx = (e.clientX-drag.x)/r.width*(view.x1-view.x0);
+  const dy = (e.clientY-drag.y)/r.height*(view.y1-view.y0);
+  view.x0-=dx; view.x1-=dx; view.y0+=dy; view.y1+=dy;
+  drag = {x:e.clientX, y:e.clientY};
+  redrawAll();
+});
+addEventListener('pointerup', () => drag = null);
+addEventListener('keydown', e => {
+  if (e.key === ' ') { e.preventDefault(); setPlaying(!playing); }
+  if (e.key === 'ArrowRight') { setPlaying(false); seek(cursor + (e.shiftKey?100:1)); }
+  if (e.key === 'ArrowLeft')  { setPlaying(false); seek(cursor - (e.shiftKey?100:1)); }
+});
+addEventListener('resize', () => { resize(); redrawAll(); });
+
+// ------------------------------------------------------------------ boot ---
+resize();
+const q = new URLSearchParams(location.search);
+if (q.get('graph')) {
+  loadFromServer(q.get('graph'), q.get('trace'))
+    .catch(err => document.getElementById('status').textContent =
+      'could not load graph — start tools/serve.py, or drop files onto the window');
+}
+frame();
+</script>
