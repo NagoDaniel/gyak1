@@ -23,3 +23,9 @@ dfs.txt
 __pycache__/
 *.pyc
 .DS_Store
+
+# local-only, kept off git on purpose
+cpp/src/dfs_reference.cpp
+cpp/src/own.cpp
+cpp/src/own_dfs.cpp
+cpp/src/student_template.cpp

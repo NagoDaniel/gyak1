@@ -19,27 +19,12 @@ foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
   set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${cfg} ${CMAKE_BINARY_DIR})
 endforeach()
 
-add_library(streetgraph INTERFACE)
-target_include_directories(streetgraph INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cpp/include)
-
-# Reference DFS, for contrast with a label-setting search.
-add_executable(dfs_reference cpp/src/dfs_reference.cpp)
-target_link_libraries(dfs_reference PRIVATE streetgraph)
-
-# What students actually edit.
-add_executable(student cpp/src/student_template.cpp)
-target_link_libraries(student PRIVATE streetgraph)
-
-# Library-free alternate template style (parses CSVs directly, no streetgraph.hpp).
-add_executable(own cpp/src/own.cpp)
-add_executable(own_dfs cpp/src/own_dfs.cpp)
+add_executable(main cpp/src/main.cpp)
 
 # Warnings on by default: most first-attempt bugs in this lab are uninitialised
 # distances or signed/unsigned comparisons, and the compiler can catch both.
-foreach(t student dfs_reference own own_dfs)
-  if(MSVC)
-    target_compile_options(${t} PRIVATE /W4)
-  else()
-    target_compile_options(${t} PRIVATE -Wall -Wextra -Wno-unused-parameter)
-  endif()
-endforeach()
+if(MSVC)
+  target_compile_options(main PRIVATE /W4)
+else()
+  target_compile_options(main PRIVATE -Wall -Wextra -Wno-unused-parameter)
+endif()
