@@ -229,11 +229,11 @@ int main(int argc, char** argv) {
 
     //bfs(source, adj, trace);
 
-    dijkstra(source, adj, trace);
+   // dijkstra(source, adj, trace);
 
    // dfs single-path mode, kept for comparison:
     // trace << "discover " << source << " " << 0.0 << " " << -1 << '\n';
-    // dfs(source, adj, target, trace);
+    dfs(source, adj, target, trace);
     // vector<int> path;
     // int cur = target;
     // while( cur != source ){
@@ -241,10 +241,10 @@ int main(int argc, char** argv) {
     //     const auto& e = edge_endpoints[via[cur]];
     //     cur = (e.first == cur) ? e.second : e.first;
     // }
-    // reverse(path.begin(), path.end());
-    // trace << "path " << dist[target];
-    // for(int e : path) trace << " " << e;
-    // trace << '\n';
+    reverse(path.begin(), path.end());
+    trace << "path " << dist[target];
+    for(int e : path) trace << " " << e;
+    trace << '\n';
 
     // trace.close();
 }

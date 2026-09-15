@@ -1,0 +1,28 @@
+Trace parancsok, amiket html viewer elfogad. Formatum: cout-szeru c++ irassal, mezok szoveges leirasaval.
+
+meta - alap info grafrol, forrasrol, celrol, csak fajl elejen kell egyszer.
+trace << "meta graph " << dir << '\n';        // dir: grafot tartalmazo mappa
+trace << "meta source " << source << '\n';    // source: kezdo csomopont id-ja
+trace << "meta target " << target << '\n';    // target: cel csomopont id-ja
+
+settle - csomopont vegleges, tavolsaga mar biztos, kek szinnel rajzolodik.
+trace << "settle " << curr << " " << dist[curr] << '\n';
+// curr: lezart csomopont id-ja
+// dist[curr]: eddigi legrovidebb tavolsag ehhez a csomoponthoz
+
+scan - el megvizsgalasa, szurke szinnel jelzi a pillanatnyi vizsgalatot.
+trace << "scan " << a.edge_id << '\n';
+// a.edge_id: eppen vizsgalt el azonositoja
+
+discover - uj csomopont felfedezve elen keresztul, tavolsaga es szulo ele eltarolva.
+trace << "discover " << a.to << " " << dist[a.to] << " " << a.edge_id << '\n';
+// a.to: ujonnan felfedezett csomopont id-ja
+// dist[a.to]: hozza tartozo (aktualis) tavolsag
+// a.edge_id: el, amin keresztul felfedeztuk (szulo el)
+
+path - vegso legrovidebb ut hossza es elei sorrendben.
+trace << "path " << dist[target];
+for(int e : path) trace << " " << e;
+trace << '\n';
+// dist[target]: teljes ut hossza / ideje
+// e (path elemei): az utvonalat alkoto elek id-i sorban
